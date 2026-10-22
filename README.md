@@ -12,39 +12,39 @@
 
 PulseChat is a full-stack, **offline-first distributed messaging platform** engineered with **Java 21, Spring Boot 3.3, MySQL, STOMP WebSockets, React 19, and Dexie.js (IndexedDB)**.
 
-Unlike naive chat applications that drop messages when internet connectivity fluctuates, PulseChat treats offline state as a first-class citizen. It implements an **IndexedDB Outbox Pattern** on the frontend paired with an **Idempotent Batch Synchronization Engine** on the backend, ensuring zero message loss and zero duplicate records across flaky mobile networks and server reconnects.
-
----
-
-## 📋 Resume Summary & Key Talking Points
-
-> **💡 For Resume / Portfolio / Interview Presentations:**
-> You can directly incorporate these bullet points into your software engineering resume:
-
-- **Architected an Offline-First Distributed Messaging Platform** using **Java 21, Spring Boot 3.3, and React 19**, ensuring zero message loss during network dropouts via an IndexedDB transactional outbox queue with optimistic UI rendering.
-- **Engineered an Idempotent Batch Synchronization Engine (`POST /api/v1/sync`)** utilizing client-generated UUIDs (`clientMessageId`) and MySQL unique constraints, eliminating 100% of duplicate message insertions during retry storms and automated reconnects.
-- **Implemented Low-Latency Real-Time Communication** via **STOMP over SockJS**, securing persistent socket sessions through a custom Spring Security `ChannelInterceptor` that parses and validates JWT bearer tokens during the STOMP `CONNECT` handshake.
-- **Designed Resilient Client-Side Caching & Reconciliation** with **Dexie.js**, managing multi-table local stores (`outbox`, `messages`, `conversations`) and bi-directional timestamp-based reconciliation (`lastSyncTimestamp`) to pull missed messages upon reconnection.
-- **Authored a Robust Test Suite (100% Pass Rate)** using **JUnit 5, Mockito, and Spring Boot Test (H2 in-memory profile)**, verifying cryptographic password hashing, transactional integrity, and idempotency guarantees.
+Unlike naive chat applications that drop messages when internet connectivity fluctuates, PulseChat treats offline state as a first-class citizen. It implements an **IndexedDB Outbox Pattern** on the frontend paired with an **Idempotent Batch Synchronization Engine** on the backend, ensuring zero message loss and zero duplicate records across unstable networks and reconnect storms.
 
 ---
 
 ## 📑 Table of Contents
-1. [System Architecture & Data Flow](#1-system-architecture--data-flow)
-2. [Key Engineering Challenges & Solutions](#2-key-engineering-challenges--solutions)
-3. [Technology Stack](#3-technology-stack)
-4. [Database Schema & ER Model](#4-database-schema--er-model)
-5. [API Specifications & WebSocket Protocol](#5-api-specifications--websocket-protocol)
-6. [Interactive Simulation & Verification Walkthrough](#6-interactive-simulation--verification-walkthrough)
-7. [Automated Testing Suite](#7-automated-testing-suite)
-8. [Local Setup & Deployment](#8-local-setup--deployment)
-9. [Technical Interview Q&A (Architecture Defense)](#9-technical-interview-qa-architecture-defense)
+1. [Key Features & Capabilities](#1-key-features--capabilities)
+2. [System Architecture & Data Flow](#2-system-architecture--data-flow)
+3. [Key Engineering Patterns & Fault Tolerance](#3-key-engineering-patterns--fault-tolerance)
+4. [Technology Stack](#4-technology-stack)
+5. [Database Schema & ER Model](#5-database-schema--er-model)
+6. [API Specifications & WebSocket Protocol](#6-api-specifications--websocket-protocol)
+7. [Offline Queuing & Real-Time Verification](#7-offline-queuing--real-time-verification)
+8. [Automated Testing Suite](#8-automated-testing-suite)
+9. [Quick Start & Deployment Guide](#9-quick-start--deployment-guide)
+10. [License](#10-license)
 
 ---
 
-## 1. System Architecture & Data Flow
+## 1. Key Features & Capabilities
 
-### 1.1 High-Level Component Architecture
+- **Zero-Loss Offline Message Queuing:** Outgoing messages composed without an active internet connection are persisted in the browser's IndexedDB and queued in an outbox.
+- **Idempotent Batch Synchronization (`POST /api/v1/sync`):** Client-generated UUIDs (`clientMessageId`) and database-level unique constraints eliminate 100% of duplicate message insertions during automated retries.
+- **Bi-Directional Delta Reconciliation:** Upon reconnection, the client automatically synchronizes pending outbox records while simultaneously querying and fetching all missed incoming messages since `lastSyncTimestamp`.
+- **Low-Latency Real-Time Messaging:** Bidirectional pub/sub communication over STOMP WebSockets with SockJS fallback and destination routing.
+- **Token-Authenticated WebSocket Upgrades:** Inbound STOMP `CONNECT` frame interception validates JWT claims and binds authenticated security principals to the live socket session.
+- **Reactive Optimistic UI:** Messages display immediately with a `🕒 PENDING` status, updating to `✓ SENT` and `✓✓ DELIVERED` as server acknowledgements return.
+- **Built-in Storage Inspector:** An interactive diagnostics panel to monitor local Dexie IndexedDB tables (`outbox`, `messages`, `conversations`) and synchronization metrics in real time.
+
+---
+
+## 2. System Architecture & Data Flow
+
+### 2.1 High-Level Component Architecture
 
 ```mermaid
 flowchart TD
@@ -86,7 +86,7 @@ flowchart TD
     SyncManager -->|Batch HTTP Payload| SecurityGateway
 ```
 
-### 1.2 Offline-to-Online Synchronization Sequence
+### 2.2 Offline-to-Online Synchronization Sequence
 
 ```mermaid
 sequenceDiagram
@@ -99,7 +99,7 @@ sequenceDiagram
     participant DB as MySQL Database
     actor Bob as Recipient (Bob)
 
-    Note over User,IDB: User disconnects (Wi-Fi dropped or Simulated)
+    Note over User,IDB: Connection Interrupted (Offline)
     User->>IDB: Send Message ("Hello Bob")
     IDB-->>User: Enqueue in Outbox (UUID: 8f2a..., status: PENDING)
     User-->>User: Optimistic UI displays 🕒 PENDING
@@ -107,7 +107,7 @@ sequenceDiagram
     Note over Net,Server: Connection Restored (online event fired)
     Net->>Sync: Trigger automatic synchronization
     Sync->>IDB: getPendingOutboxMessages() + getLastSyncTimestamp()
-    IDB-->>Sync: Return 1 queued message, timestamp: T0
+    IDB-->>Sync: Return queued messages, checkpoint: T0
 
     Sync->>Server: POST /api/v1/sync { pendingMessages: [...], lastSyncTimestamp: T0 }
     
@@ -133,26 +133,26 @@ sequenceDiagram
 
 ---
 
-## 2. Key Engineering Challenges & Solutions
+## 3. Key Engineering Patterns & Fault Tolerance
 
-| Engineering Challenge | Naive Approach | PulseChat Production Solution |
+| Architecture Requirement | Traditional Approach | PulseChat Enterprise Implementation |
 |---|---|---|
-| **Message loss during network drops** | Send HTTP/WS request directly; fail and notify user to re-type. | **Transactional Outbox Pattern:** Outgoing messages are written to Dexie IndexedDB with status `PENDING` *before* attempting network transmission. |
-| **Duplicate messages on retry/reconnect** | Auto-increment primary key on backend causes duplicated rows if client retries after network timeouts. | **Client-Generated UUID Idempotency:** Client assigns `clientMessageId = crypto.randomUUID()`. Backend enforces a database-level `UNIQUE` index on `client_message_id`. Retries return existing records idempotently. |
-| **WebSocket Authentication** | Browsers cannot set custom HTTP Authorization headers during standard `new WebSocket()` upgrades. | **STOMP Frame Interception:** `WebSocketAuthInterceptor` intercepts the native STOMP `CONNECT` frame, extracts `Authorization: Bearer <token>`, validates the JWT, and binds `UsernamePasswordAuthenticationToken` to the WebSocket session. |
-| **Missed messages while offline** | User misses all incoming messages sent while disconnected. | **Bi-Directional Reconciliation:** The sync payload supplies `lastSyncTimestamp`. The server responds not only with acknowledgements but also queries and returns all messages received from other participants since that timestamp. |
-| **Optimistic UI with Reactive Storage** | Stale local state or complex manual DOM mutations. | **Reactive Local Mirror:** The UI state renders directly from local storage. When server acknowledgements arrive, IndexedDB records update and cascade reactively to the view. |
+| **Message loss during network drops** | Immediate network request; fails and drops user input on timeout. | **Transactional Outbox Pattern:** Messages are committed to Dexie IndexedDB with status `PENDING` *before* attempting network transport. |
+| **Duplicate messages on retry/reconnect** | Auto-increment IDs on the backend create duplicate rows if a client retries after a timeout. | **Client-Generated UUID Idempotency:** Client stamps `clientMessageId = crypto.randomUUID()`. Database enforces `UNIQUE(client_message_id)`. Retries safely return existing records. |
+| **WebSocket Authentication** | Standard browser WebSocket APIs disallow custom HTTP Authorization headers during initial handshake. | **STOMP Frame Interception:** A custom `ChannelInterceptor` extracts the JWT bearer token from the STOMP `CONNECT` frame and establishes the authenticated `Principal`. |
+| **Missed messages while offline** | Disconnected users miss all messages broadcast while offline. | **Bi-Directional Timestamp Checkpointing:** The sync request sends `lastSyncTimestamp`. The server delivers missed messages across all joined conversations since that timestamp. |
+| **Non-blocking storage operations** | Synchronous `localStorage` blocks the main browser UI thread and is capped at ~5MB. | **Asynchronous IndexedDB:** Dexie.js provides non-blocking, transaction-safe storage supporting large message histories and atomic outbox mutations. |
 
 ---
 
-## 3. Technology Stack
+## 4. Technology Stack
 
 ### Backend
 - **Core Framework:** Java 21 LTS, Spring Boot 3.3.4
 - **Security:** Spring Security 6 with JJWT 0.12.6 (Stateless Token Authentication, BCrypt password hashing)
-- **Real-Time Protocol:** Spring WebSocket with STOMP broker and SockJS fallback
-- **Data Persistence:** Spring Data JPA, Hibernate ORM 6.5, HikariCP connection pooling
-- **Databases:** MySQL 8.0 (Production) & H2 Database (In-Memory for unit/integration tests)
+- **Real-Time Messaging:** Spring WebSocket with STOMP broker and SockJS fallback
+- **Data Access:** Spring Data JPA, Hibernate ORM 6.5, HikariCP connection pooling
+- **Databases:** MySQL 8.0 (Production) & H2 Database (In-Memory / File-based for fast local runs and tests)
 - **API Documentation:** SpringDoc OpenAPI 2.6 (Swagger UI 3.0)
 - **Testing:** JUnit 5, Mockito, Spring Boot Test, AssertJ
 
@@ -161,11 +161,11 @@ sequenceDiagram
 - **Offline Storage:** Dexie.js 4.4 (IndexedDB wrapper with ACID transactions)
 - **Real-Time Client:** `@stomp/stompjs` 7.5 & `sockjs-client` 1.6
 - **HTTP Client:** Axios with JWT request injection and 401 response interceptors
-- **Styling & UI:** Custom design system (Dark obsidian palette, glassmorphism, glowing status badges, responsive mobile layout)
+- **Styling:** Custom Vanilla CSS design system (Dark obsidian palette, glassmorphism, responsive layout)
 
 ---
 
-## 4. Database Schema & ER Model
+## 5. Database Schema & ER Model
 
 ```
 +-----------------------------------------------------------+
@@ -221,18 +221,18 @@ sequenceDiagram
 ```
 
 ### Indexing Strategy
-- `idx_users_username` on `users(username)` — High-speed login lookup.
-- `idx_users_email` on `users(email)` — Fast uniqueness checks.
-- `idx_messages_client_id` on `messages(client_message_id)` — Instant O(1) deduplication check during batch sync.
-- `idx_messages_conv_server_time` on `messages(conversation_id, server_received_at)` — Paginated history and missed-messages delta sync.
+- `idx_users_username` on `users(username)` — Accelerated user discovery and login queries.
+- `idx_users_email` on `users(email)` — Fast email uniqueness validation.
+- `idx_messages_client_id` on `messages(client_message_id)` — Instant $O(1)$ deduplication check during batch synchronization.
+- `idx_messages_conv_server_time` on `messages(conversation_id, server_received_at)` — Optimized paginated history and delta reconciliation.
 
 ---
 
-## 5. API Specifications & WebSocket Protocol
+## 6. API Specifications & WebSocket Protocol
 
-### 5.1 REST APIs
+### 6.1 REST Endpoints
 
-All authenticated endpoints require header: `Authorization: Bearer <jwt-token>`.
+All authenticated endpoints require the header: `Authorization: Bearer <jwt-token>`.
 
 #### Authentication (`/api/v1/auth`)
 | Method | Endpoint | Request Body | Description |
@@ -241,7 +241,7 @@ All authenticated endpoints require header: `Authorization: Bearer <jwt-token>`.
 | `POST` | `/api/v1/auth/login` | `{ usernameOrEmail, password }` | Authenticates credentials, returns JWT |
 | `GET` | `/api/v1/auth/me` | *None* | Returns authenticated user profile |
 
-#### Synchronization (`/api/v1/sync`)
+#### Offline Synchronization (`/api/v1/sync`)
 | Method | Endpoint | Request Body | Response Body |
 |---|---|---|---|
 | `POST` | `/api/v1/sync` | `SyncRequest` | `SyncResponse` |
@@ -253,7 +253,7 @@ All authenticated endpoints require header: `Authorization: Bearer <jwt-token>`.
     {
       "clientMessageId": "8f2a1b94-5c3e-4d2a-b011-8e7c5d4f3a12",
       "conversationId": 10,
-      "content": "Message written while offline",
+      "content": "Message composed during connection drop",
       "clientCreatedAt": "2026-10-22T14:30:00Z"
     }
   ],
@@ -293,9 +293,9 @@ All authenticated endpoints require header: `Authorization: Bearer <jwt-token>`.
 
 ---
 
-### 5.2 STOMP WebSocket Protocol
+### 6.2 STOMP WebSocket Protocol
 
-- **Connection URL:** `http://localhost:8080/ws` (with SockJS negotiation)
+- **Endpoint:** `http://localhost:8080/ws` (with SockJS handshake fallback)
 - **STOMP Connect Header:** `Authorization: Bearer <jwt-token>`
 
 | Destination | Direction | Payload Schema | Description |
@@ -306,42 +306,43 @@ All authenticated endpoints require header: `Authorization: Bearer <jwt-token>`.
 
 ---
 
-## 6. Interactive Simulation & Verification Walkthrough
+## 7. Offline Queuing & Real-Time Verification
 
-PulseChat includes a built-in **Simulation & Diagnostics Engine** designed specifically for demonstration and technical interviews:
+PulseChat includes a built-in **Simulation & Diagnostics Engine** to verify offline durability and synchronization workflows:
 
-1. **Multi-User Real-Time Testing:**
+1. **Multi-User Real-Time Communication:**
    - Open `http://localhost:5173` in two browser windows side-by-side.
    - Use the **1-Click Demo Accounts**: Sign in as **👩 Alice** in Window 1 and **👨 Bob** in Window 2.
-   - Start a conversation and send messages — observe sub-second WebSocket delivery with `✓✓ Delivered` badges.
+   - Open a direct conversation and exchange messages to verify sub-second WebSocket transmission with `✓✓ Delivered` receipt indicators.
 
-2. **Testing Offline Queuing:**
-   - In Alice's window, click **⚡ Simulate Offline** in the top navigation bar.
-   - The status badge switches to `Offline (Simulated)` and severs the WebSocket connection.
-   - Type `"Urgent message written without connection"` and click send.
+2. **Simulating Connection Disruption:**
+   - In Alice's window, click **⚡ Simulate Offline** in the navigation header.
+   - The status indicator switches to `Offline (Simulated)` and severs the active WebSocket session.
+   - Compose and send a message.
    - The message bubble renders optimistically with a **`🕒 Pending`** status icon.
-   - Open the **💾 Storage Inspector** modal: View the raw record queued in the Dexie IndexedDB `outbox` table with its generated UUID.
+   - Click **💾 Storage** in the navigation bar to inspect the Dexie IndexedDB `outbox` table and verify the pending record and generated UUID.
 
-3. **Testing Automatic Reconnect & Idempotent Sync:**
-   - In Alice's window, click **⚡ Simulating Offline** to restore the network.
-   - The sync coordinator automatically fires, executes `POST /api/v1/sync`, updates the status to **`✓ Sent`**, clears the outbox, and delivers the message to Bob's window in real time.
-   - Clicking **Sync Outbox Now** again demonstrates idempotency: `0 duplicates inserted, 0 errors`.
+3. **Automatic Reconnection & Batch Sync:**
+   - Click **⚡ Simulating Offline** to reconnect.
+   - The sync manager automatically triggers `POST /api/v1/sync`.
+   - The status transitions to **`✓ Sent`**, the local outbox clears, and the message is delivered to Bob's window in real time.
+   - Subsequent sync triggers demonstrate database idempotency (`0 duplicates inserted`).
 
 ---
 
-## 7. Automated Testing Suite
+## 8. Automated Testing Suite
 
-PulseChat includes an automated test suite verifying edge cases, authentication guards, and deduplication logic:
+PulseChat maintains an automated test suite verifying business layer transactions, authentication constraints, and deduplication logic:
 
 ```bash
 cd backend
 ./mvnw test
 ```
 
-### Test Coverage Highlights
-- **`BackendApplicationTests`**: Verifies full Spring context bootstrapping, JPA entity mappings, and Hibernate schema generation.
-- **`AuthServiceTest`**: Validates user registration, BCrypt password encryption, duplicate username/email conflict rejection, and JWT generation.
-- **`MessageServiceTest`**: Tests idempotent saving logic — asserts that sending the same `clientMessageId` returns the existing record without database duplicate writes.
+### Test Coverage Breakdown
+- **`BackendApplicationTests`**: Validates Spring ApplicationContext initialization, JPA repository bootstrapping, and Hibernate schema generation.
+- **`AuthServiceTest`**: Validates user registration, BCrypt password hashing, uniqueness constraints, and JWT generation.
+- **`MessageServiceTest`**: Asserts that repeating a `clientMessageId` returns the existing record idempotently without database duplicate writes.
 - **`SyncServiceTest`**: Simulates batch outbox synchronization, acknowledgement mapping, and duplicate skip tracking (`duplicatesSkipped`).
 
 ```text
@@ -360,55 +361,43 @@ cd backend
 
 ---
 
-## 8. Local Setup & Deployment
+## 9. Quick Start & Deployment Guide
 
 ### Prerequisites
 - **Java 21 JDK**
 - **Node.js 18+** & **npm**
-- **Docker & Docker Compose** (or local MySQL 8.0)
+- **Docker & Docker Compose** (optional; local mode runs with persistent file-based H2 database)
 
-### 1. Database Setup
+### Option A: Run with Docker Compose (MySQL 8.0)
 ```bash
+# 1. Start MySQL container
 docker compose up -d
-```
-*Spins up a preconfigured MySQL 8.0 container on port `3306` with database `offline_chat_db`.*
 
-### 2. Run Backend
+# 2. Run backend
+cd backend
+./mvnw spring-boot:run
+```
+
+### Option B: Zero-Config Local Run (Embedded Persistence)
 ```bash
+# Run backend directly (uses persistent file database in ./data/chatdb)
 cd backend
 ./mvnw spring-boot:run
 ```
 - API Base URL: `http://localhost:8080`
-- Swagger UI: `http://localhost:8080/swagger-ui.html`
-- OpenAPI JSON Spec: `http://localhost:8080/api-docs`
+- Swagger UI Documentation: `http://localhost:8080/swagger-ui.html`
+- OpenAPI Specification: `http://localhost:8080/api-docs`
 
-### 3. Run Frontend
+### Frontend Launch
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
-- Access the web application at: `http://localhost:5173`
+- Access the web interface at: `http://localhost:5173`
 
 ---
 
-## 9. Technical Interview Q&A (Architecture Defense)
+## 10. License
 
-### Q1: Why use client-generated UUIDs (`clientMessageId`) instead of letting the database auto-increment IDs?
-> **Answer:** If ID generation is left to the server, a client that loses connection while waiting for a response has no way to know if its message was persisted or not. Retrying would cause the server to assign a brand new auto-increment ID, creating duplicate messages. By assigning a UUID on the client *before* network transmission, the UUID serves as a distributed idempotency key. The database enforces `UNIQUE(client_message_id)`, guaranteeing exactly-once message semantics.
-
-### Q2: Why STOMP over raw WebSockets?
-> **Answer:** Raw WebSockets only define a bidirectional stream of bytes/text without routing or frame semantics. STOMP (Simple Text Oriented Messaging Protocol) introduces a lightweight pub/sub abstraction with standard frame types (`CONNECT`, `SEND`, `SUBSCRIBE`, `MESSAGE`) and destination headers. This allows seamless integration with Spring's `@MessageMapping`, user-destination routing (`/user/{username}/queue/...`), and broker pluggability (in-memory Simple Broker for development, RabbitMQ/ActiveMQ for production clusters).
-
-### Q3: How do you authenticate WebSocket connections with JWT?
-> **Answer:** Unlike standard HTTP requests where headers like `Authorization: Bearer <token>` can be injected into fetch/axios, the browser's native `WebSocket` API does not allow custom headers during the initial HTTP upgrade request. To solve this cleanly, we authenticate during the STOMP handshake: the client transmits the JWT in the headers of the STOMP `CONNECT` frame. On the backend, a custom `WebSocketAuthInterceptor` (implementing Spring's `ChannelInterceptor`) intercepts the inbound `CONNECT` command, validates the token using `JwtTokenProvider`, and sets the authenticated `Principal` on the STOMP session.
-
-### Q4: Why Dexie.js (IndexedDB) instead of LocalStorage?
-> **Answer:** `localStorage` is synchronous, blocking the main browser UI thread on reads/writes. It is limited to ~5MB of UTF-16 string storage and lacks indexing or transactional capabilities. `IndexedDB` is asynchronous, supports non-blocking operations, transactional integrity (ACID within the client), index-based lookups, and gigabytes of structured storage. Dexie.js provides a clean Promise-based abstraction to execute atomic outbox operations without race conditions.
-
----
-
-## 👨‍💻 Author & Portfolio Details
-- **Project:** PulseChat (Offline-First Real-Time Chat Platform)
-- **Role:** Full-Stack Software Engineer
-- **Core Competencies:** Java 21, Spring Boot, Spring Security, WebSockets, Distributed Synchronization, React, Database Design, Testing (JUnit/Mockito).
+This project is open-source software licensed under the [MIT License](LICENSE).
