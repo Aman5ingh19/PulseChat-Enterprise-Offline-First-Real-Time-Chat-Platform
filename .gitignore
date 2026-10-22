@@ -17,6 +17,8 @@ Thumbs.db
 
 # Logs & temp
 *.log
+backend/data/
+**/data/
 scratch/
 temp/
 
