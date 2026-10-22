@@ -1,0 +1,25 @@
+# Root gitignore
+
+# Build and dependencies
+**/target/
+**/node_modules/
+**/dist/
+frontend/dist/
+
+# IDE and Editor files
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+.DS_Store
+Thumbs.db
+
+# Logs & temp
+*.log
+scratch/
+temp/
+
+# Environment files
+.env
+.env.local
