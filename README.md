@@ -50,26 +50,26 @@ Unlike naive chat applications that drop messages when internet connectivity flu
 flowchart TD
     subgraph Client ["Client Browser (React 19 + Dexie IndexedDB)"]
         UI["React UI (ChatArea, Sidebar, SyncInspector)"]
-        OutboxDB[("Dexie.js Outbox\n(UUID Primary Key)")]
-        MsgCache[("Dexie.js Message Cache\n(Local Mirror)")]
-        SyncManager["Sync Coordinator\n(Online/Offline Listeners)"]
-        WSClient["STOMP / SockJS Client\n(/user/queue/messages)"]
+        OutboxDB[("Dexie.js Outbox (UUID Primary Key)")]
+        MsgCache[("Dexie.js Message Cache (Local Mirror)")]
+        SyncManager["Sync Coordinator (Online/Offline Monitor)"]
+        WSClient["STOMP / SockJS Client"]
 
-        UI -->|1. Optimistic Write (Status: PENDING)| OutboxDB
-        UI -->|Display Instantly| MsgCache
-        SyncManager -->|Flush Pending on Reconnect| OutboxDB
-        WSClient <-->|Bi-directional STOMP| UI
+        UI -->|"1. Optimistic Write (Pending)"| OutboxDB
+        UI -->|"Display Instantly"| MsgCache
+        SyncManager -->|"Flush Pending on Reconnect"| OutboxDB
+        WSClient <-->|"Bi-directional STOMP"| UI
     end
 
     subgraph Backend ["Spring Boot 3.3 Backend"]
         SecurityGateway["Spring Security 6 (Stateless JWT Filter)"]
-        WSChannelInterceptor["WebSocketAuthInterceptor\n(STOMP CONNECT Auth)"]
-        SyncCtrl["SyncController\n(POST /api/v1/sync)"]
-        ChatCtrl["WebSocketChatController\n(/app/chat.send/{id})"]
+        WSChannelInterceptor["WebSocketAuthInterceptor (STOMP CONNECT Auth)"]
+        SyncCtrl["SyncController (POST /api/v1/sync)"]
+        ChatCtrl["WebSocketChatController (/app/chat.send)"]
         
-        SyncService["SyncService\n(@Transactional Deduplication)"]
-        MsgService["MessageService\n(Idempotent Save)"]
-        NotificationService["WebSocketNotificationService\n(SimpMessagingTemplate)"]
+        SyncService["SyncService (@Transactional Deduplication)"]
+        MsgService["MessageService (Idempotent Save)"]
+        NotificationService["WebSocketNotificationService (SimpMessagingTemplate)"]
 
         SecurityGateway --> SyncCtrl
         WSChannelInterceptor --> ChatCtrl
@@ -78,12 +78,12 @@ flowchart TD
     end
 
     subgraph Persistence ["Persistence Layer (MySQL 8.0)"]
-        DB[(offline_chat_db\n- users\n- conversations\n- participants\n- messages UNIQUE client_msg_id)]
+        DB[("MySQL Database (offline_chat_db)")]
         MsgService --> DB
     end
 
-    WSClient <-->|Persistent WebSocket Frame| WSChannelInterceptor
-    SyncManager -->|Batch HTTP Payload| SecurityGateway
+    WSClient <-->|"Persistent WebSocket Frame"| WSChannelInterceptor
+    SyncManager -->|"Batch HTTP Payload"| SecurityGateway
 ```
 
 ### 2.2 Offline-to-Online Synchronization Sequence
@@ -101,22 +101,22 @@ sequenceDiagram
 
     Note over User,IDB: Connection Interrupted (Offline)
     User->>IDB: Send Message ("Hello Bob")
-    IDB-->>User: Enqueue in Outbox (UUID: 8f2a..., status: PENDING)
-    User-->>User: Optimistic UI displays 🕒 PENDING
+    IDB-->>User: Enqueue in Outbox (UUID, status: PENDING)
+    User-->>User: Optimistic UI displays Pending Clock Icon
 
     Note over Net,Server: Connection Restored (online event fired)
     Net->>Sync: Trigger automatic synchronization
     Sync->>IDB: getPendingOutboxMessages() + getLastSyncTimestamp()
-    IDB-->>Sync: Return queued messages, checkpoint: T0
+    IDB-->>Sync: Return queued messages and checkpoint T0
 
-    Sync->>Server: POST /api/v1/sync { pendingMessages: [...], lastSyncTimestamp: T0 }
+    Sync->>Server: POST /api/v1/sync (pendingMessages, lastSyncTimestamp)
     
     rect rgb(20, 30, 50)
         Note over Server,DB: Backend Transactional Processing
-        Server->>DB: Check EXISTS(client_message_id = '8f2a...')
+        Server->>DB: Check if client_message_id exists
         alt Message does not exist (New)
-            Server->>DB: INSERT INTO messages (...) VALUES (...)
-            Server->>DB: Update conversation preview & last_message_at
+            Server->>DB: INSERT INTO messages
+            Server->>DB: Update conversation preview and timestamp
             Server->>Bob: Push via STOMP /user/bob/queue/messages
         else Message already exists (Duplicate retry)
             Server-->>Server: Increment duplicatesSkipped, fetch existing ID
@@ -125,10 +125,10 @@ sequenceDiagram
         DB-->>Server: Return messages from other participants
     end
 
-    Server-->>Sync: SyncResponse { acknowledged: {'8f2a...': 104}, newMessages: [], duplicatesSkipped: 0 }
-    Sync->>IDB: Mark message SENT, update serverId: 104, remove from outbox
+    Server-->>Sync: Return SyncResponse (Acknowledged IDs, Missed Messages)
+    Sync->>IDB: Mark message SENT, update serverId, remove from outbox
     Sync->>IDB: Update lastSyncTimestamp = now()
-    Sync-->>User: UI updates status: 🕒 PENDING ➔ ✓ SENT
+    Sync-->>User: UI updates status: PENDING to SENT
 ```
 
 ---
